@@ -23,7 +23,8 @@ export BINDIR,
        isbsd,
        islinux,
        isunix,
-       iswindows
+       iswindows,
+       which
 
 import ..Base: show
 
@@ -311,6 +312,7 @@ if iswindows()
 else
     windows_version() = v"0.0"
 end
+
 """
     Sys.windows_version()
 
@@ -320,5 +322,92 @@ i.e. `v"major.minor.build"`, or `v"0.0.0"` if this is not running on Windows.
 windows_version
 
 const WINDOWS_VISTA_VER = v"6.0"
+
+"""
+    Sys.isexecutable(path::AbstractString)
+
+Returns `true` if the given `path` has executable permissions.
+"""
+function isexecutable(path::AbstractString)
+    @static if iswindows()
+        return true
+    else
+        # We use `access()` and `X_OK` to determine if a given path is
+        # executable by the current user.  `X_OK` comes from `unistd.h`.
+        X_OK = 0x01
+        ccall(:access, Cint, (Ptr{UInt8}, Cint), path, X_OK) == 0
+    end
+end
+
+"""
+    Sys.which(program_name::AbstractString)
+
+Given a program name, searches the current `PATH` to find the first binary with
+the proper executable permissions that can be run, and returns the absolute
+path. Raises `ArgumentError` if no such program is available.  If a relative or
+absolute path is passed in for `program_name`, that exact path is tested for
+executable permissions only, no searching of `PATH` is performed.
+"""
+function which(program_name::AbstractString)
+    # If prog has a slash, we know the user wants to determine whether the given
+    # file exists and is executable, and to not search the `PATH`.  Note that
+    # Windows can have either `\\` or `/` in its paths:
+    dirseps = @static iswindows() ? ('/', '\\') : ('/', )
+
+    if any(occursin.(dirseps, program_name))
+        # If this file does not even exist, fail out
+        if !isfile(program_name)
+            throw(ArgumentError("$program_name does not exist"))
+        end
+
+        # If it does exist, check that it's executable or fail out
+        if !isexecutable(program_name)
+            throw(ArgumentError("$program_name is not executable"))
+        end
+
+        # If it all checks out, return the abspath
+        return abspath(program_name)
+    end
+
+    # If we have been given just a program name (not a relative or absolute
+    # path) then we should search `PATH` for it here:
+    pathsep = @static iswindows() ? ';' : ':'
+    path_dirs = split(get(ENV, "PATH", ""), pathsep)
+
+    # On windows we always check the current directory as well
+    @static if iswindows()
+        insert!(path_dirs, 1, pwd())
+    end
+
+    # Build a list of program names that we're going to try
+    program_names = []
+    @static if iswindows()
+        # If the file already has an extension, try that name first
+        if !isempty(splitext(program_name)[2])
+            push!(program_names, program_name)
+        end
+
+        # But also try appending .exe and .com`
+        for pe in (".exe", ".com")
+            push!(program_names, string(program_name, pe))
+        end
+    else
+        # On non-windows, we just always search for what we've been given
+        push!(program_names, [program_name])
+    end
+
+    for path_dir in path_dirs
+        for program_name in program_names
+            program_path = joinpath(path_dir, program_name)
+            # If we find something that matches our name and we can execute
+            if isfile(program_path) && isexecutable(program_path)
+                return abspath(program_path)
+            end
+        end
+    end
+
+    # If we couldn't find anything, complain
+    throw(ArgumentError("$program_name not found"))
+end
 
 end # module Sys
